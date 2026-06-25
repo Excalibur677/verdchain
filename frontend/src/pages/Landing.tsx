@@ -2,6 +2,7 @@ import Hero from "../components/landing/Hero";
 import Marquee from "../components/landing/Marquee";
 import WhatWeDo from "../components/landing/WhatWeDo";
 import ArchitectureCards from "../components/landing/ArchitectureCards";
+import Footer from "../components/landing/Footer";
 
 export default function Landing() {
   return (
@@ -10,6 +11,7 @@ export default function Landing() {
       <Marquee />
       <WhatWeDo />
       <ArchitectureCards />
+      <Footer />
     </main>
   );
 }
