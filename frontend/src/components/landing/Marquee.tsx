@@ -147,7 +147,10 @@ function InfiniteTrack({
     if (direction === -1 && x.get() > 0)     x.set(x.get() - half);
   });
 
-  const doubled = [...items, ...items];
+  const doubled = [
+    ...items.map((item, i) => <div key={`a-${i}`}>{item}</div>),
+    ...items.map((item, i) => <div key={`b-${i}`}>{item}</div>),
+  ];
 
   return (
     <div style={{ overflow: "hidden", width: "100%" }}>
