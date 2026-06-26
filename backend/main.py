@@ -450,3 +450,23 @@ def simulate_wind(extreme: bool = False):
         "source":         "NOAA-simulated",
         "would_trigger":  wind_speed >= INSURANCE_WIND_THRESHOLD_MPH
     }
+
+@app.get("/model/status")
+def get_ml_model_status():
+    from ml_model import get_model_status
+    return {
+        "model": get_model_status(),
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+@app.post("/model/retrain")
+def trigger_manual_retrain():
+    from ml_model import run_full_retrain_cycle
+    import threading
+    thread = threading.Thread(target=run_full_retrain_cycle, daemon=True)
+    thread.start()
+    return {
+        "status":    "retrain_triggered",
+        "message":   "Retraining started in background",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }

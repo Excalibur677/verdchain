@@ -238,7 +238,7 @@ export default function Hero() {
             <button
               key={item}
               onClick={() => {
-                const el = document.getElementById(item.toLowerCase().replace(" ", "-"));
+                const el = document.getElementById(item.toLowerCase().replace(/\s+/g, "-"));
                 el?.scrollIntoView({ behavior: "smooth" });
               }}
               style={{
