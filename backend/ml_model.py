@@ -1,4 +1,4 @@
-﻿import numpy as np
+import numpy as np
 import pandas as pd
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
@@ -274,7 +274,7 @@ def run_full_fraud_check(reading: dict) -> dict:
     result["checks"]["signature"]["passed"] = sig_valid
     if not sig_valid:
         result["is_valid"] = False
-        result["checks"]["signature"]["reason"] = "Invalid cryptographic signature â€” reading dropped"
+        result["checks"]["signature"]["reason"] = "Invalid cryptographic signature — reading dropped"
         return result
     result["checks"]["signature"]["reason"] = "ECDSA signature verified"
 
@@ -299,7 +299,7 @@ def run_full_fraud_check(reading: dict) -> dict:
     zscore_ok, zscore_reason = check_zscore(reading, device_id)
     zscore_ok = bool(zscore_ok)
     result["checks"]["zscore"]["passed"] = zscore_ok
-    result["checks"]["zscore"]["reason"] = zscore_reason or "Z-score within 2.5Ïƒ threshold"
+    result["checks"]["zscore"]["reason"] = zscore_reason or "Z-score within 2.5σ threshold"
     if not zscore_ok:
         result["is_anomaly"] = True
         result["anomaly_reason"] = f"Z-score anomaly: {zscore_reason}"
@@ -360,9 +360,9 @@ def compute_batch_hash(readings: list) -> str:
     return hashlib.sha256(batch_str.encode()).hexdigest()
 
 initialize_models()
-
 import threading
 import time
+import sqlite3
 from datetime import datetime, timezone
 
 MODEL_VERSION = {
@@ -380,16 +380,32 @@ MODEL_VERSION = {
 
 RETRAIN_INTERVAL_SECONDS = 21600
 MIN_SAMPLES_FOR_RETRAIN  = 50
+DB_PATH_FOR_RETRAIN      = "verdchain.db"
 
 
-def fetch_real_readings_from_db(device_id=None, limit=2000):
+def fetch_real_readings_from_db(device_id: str = None, limit: int = 2000) -> list:
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH_FOR_RETRAIN)
         c    = conn.cursor()
         if device_id:
-            c.execute('SELECT ph, salinity, moisture, dissolved_o2 FROM readings WHERE is_valid=1 AND is_anomaly=0 AND device_id=? ORDER BY created_at DESC LIMIT ?', (device_id, limit))
+            c.execute('''
+                SELECT ph, salinity, moisture, dissolved_o2
+                FROM readings
+                WHERE is_valid = 1
+                AND is_anomaly = 0
+                AND device_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+            ''', (device_id, limit))
         else:
-            c.execute('SELECT ph, salinity, moisture, dissolved_o2 FROM readings WHERE is_valid=1 AND is_anomaly=0 ORDER BY created_at DESC LIMIT ?', (limit,))
+            c.execute('''
+                SELECT ph, salinity, moisture, dissolved_o2
+                FROM readings
+                WHERE is_valid = 1
+                AND is_anomaly = 0
+                ORDER BY created_at DESC
+                LIMIT ?
+            ''', (limit,))
         rows = c.fetchall()
         conn.close()
         return [{"ph": r[0], "salinity": r[1], "moisture": r[2], "dissolved_o2": r[3]} for r in rows]
@@ -398,48 +414,79 @@ def fetch_real_readings_from_db(device_id=None, limit=2000):
         return []
 
 
-def compute_model_accuracy(model, scaler, test_data):
+def compute_model_accuracy(model, scaler, test_data: list) -> float:
     if not test_data:
         return 0.0
     try:
-        features    = np.array([[r["ph"], r["salinity"], r["moisture"], r["dissolved_o2"]] for r in test_data])
+        features = np.array([
+            [r["ph"], r["salinity"], r["moisture"], r["dissolved_o2"]]
+            for r in test_data
+        ])
         scaled      = scaler.transform(features)
         predictions = model.predict(scaled)
-        return round(float(np.sum(predictions == 1) / len(predictions)), 4)
+        normal_pct  = float(np.sum(predictions == 1) / len(predictions))
+        return round(normal_pct, 4)
     except Exception:
         return 0.0
 
 
-def retrain_model_from_real_data(device_id):
+def retrain_model_from_real_data(device_id: str) -> bool:
     global MODEL_VERSION
+
     print(f"[ML] Starting retrain for {device_id}...")
     real_readings = fetch_real_readings_from_db(device_id=device_id, limit=2000)
+
     if len(real_readings) < MIN_SAMPLES_FOR_RETRAIN:
-        real_readings = fetch_real_readings_from_db(limit=2000)
-    if len(real_readings) < MIN_SAMPLES_FOR_RETRAIN:
-        print(f"[ML] Not enough data — skipping {device_id}")
-        return False
+        print(f"[ML] Not enough real data for {device_id} — {len(real_readings)} samples (need {MIN_SAMPLES_FOR_RETRAIN})")
+
+        all_readings = fetch_real_readings_from_db(device_id=None, limit=2000)
+        if len(all_readings) < MIN_SAMPLES_FOR_RETRAIN:
+            print(f"[ML] Not enough global data either — skipping retrain")
+            return False
+        real_readings = all_readings
+        print(f"[ML] Using {len(all_readings)} global readings for {device_id}")
+
     df = pd.DataFrame(real_readings)
-    df["ph"]           = df["ph"].clip(5.0, 10.0)
-    df["salinity"]     = df["salinity"].clip(0.0, 55.0)
+    df["ph"]           = df["ph"].clip(5.0,  10.0)
+    df["salinity"]     = df["salinity"].clip(0.0,  55.0)
     df["moisture"]     = df["moisture"].clip(10.0, 100.0)
-    df["dissolved_o2"] = df["dissolved_o2"].clip(0.5, 15.0)
+    df["dissolved_o2"] = df["dissolved_o2"].clip(0.5,  15.0)
     df = df.dropna()
-    split_idx    = int(len(df) * 0.85)
-    train_df     = df.iloc[:split_idx]
-    test_df      = df.iloc[split_idx:]
-    new_scaler   = StandardScaler()
+
+    split_idx   = int(len(df) * 0.85)
+    train_df    = df.iloc[:split_idx]
+    test_df     = df.iloc[split_idx:]
+
+    new_scaler  = StandardScaler()
     train_scaled = new_scaler.fit_transform(train_df)
-    new_model    = IsolationForest(n_estimators=300, contamination=0.05, random_state=int(time.time()) % 1000, max_samples="auto")
+
+    new_model = IsolationForest(
+        n_estimators=300,
+        contamination=0.05,
+        random_state=int(time.time()) % 1000,
+        max_samples="auto",
+        max_features=1.0,
+        bootstrap=False,
+    )
     new_model.fit(train_scaled)
+
     test_readings    = test_df.to_dict("records")
     new_accuracy     = compute_model_accuracy(new_model, new_scaler, test_readings)
-    current_accuracy = compute_model_accuracy(isolation_forests.get(device_id, new_model), scalers.get(device_id, new_scaler), test_readings)
-    print(f"[ML] {device_id} — new: {new_accuracy:.4f} vs current: {current_accuracy:.4f}")
+    current_accuracy = compute_model_accuracy(
+        isolation_forests.get(device_id, new_model),
+        scalers.get(device_id, new_scaler),
+        test_readings
+    )
+
+    print(f"[ML] {device_id} — new accuracy: {new_accuracy:.4f} vs current: {current_accuracy:.4f}")
+
     if new_accuracy >= current_accuracy - 0.02:
         isolation_forests[device_id] = new_model
         scalers[device_id]           = new_scaler
-        reading_history[device_id]   = []
+
+        if device_id in reading_history:
+            reading_history[device_id] = []
+
         if device_id in BASELINE_STATS:
             BASELINE_STATS[device_id] = {
                 "ph":           {"mean": float(train_df["ph"].mean()),           "std": max(float(train_df["ph"].std()), 0.01)},
@@ -447,53 +494,75 @@ def retrain_model_from_real_data(device_id):
                 "moisture":     {"mean": float(train_df["moisture"].mean()),     "std": max(float(train_df["moisture"].std()), 0.01)},
                 "dissolved_o2": {"mean": float(train_df["dissolved_o2"].mean()), "std": max(float(train_df["dissolved_o2"].std()), 0.01)},
             }
-        print(f"[ML] Model updated for {device_id} on {len(train_df)} real samples")
+
+        print(f"[ML] Model updated for {device_id} — trained on {len(train_df)} real samples")
         return True
-    print(f"[ML] New model worse — keeping existing for {device_id}")
-    return False
+    else:
+        print(f"[ML] New model worse for {device_id} — keeping existing model")
+        return False
 
 
 def run_full_retrain_cycle():
     global MODEL_VERSION
-    print("[ML] ===== RETRAIN CYCLE STARTING =====")
-    MODEL_VERSION["status"]          = "retraining"
+
+    print(f"\n[ML] ========== RETRAIN CYCLE STARTING ==========")
+    MODEL_VERSION["status"]         = "retraining"
     MODEL_VERSION["last_retrain_at"] = datetime.now(timezone.utc).isoformat()
-    all_real = fetch_real_readings_from_db(limit=10000)
-    print(f"[ML] Real verified readings available: {len(all_real)}")
+
+    total_real = fetch_real_readings_from_db(limit=1)
+    all_real   = fetch_real_readings_from_db(limit=10000)
+
+    print(f"[ML] Total real verified readings available: {len(all_real)}")
+
     if len(all_real) < MIN_SAMPLES_FOR_RETRAIN:
-        print("[ML] Insufficient data — skipping")
+        print(f"[ML] Insufficient data — skipping retrain cycle")
         MODEL_VERSION["status"] = "ready"
         return
+
     success_count = 0
     for device_id in DEVICE_SECRETS.keys():
         try:
-            if retrain_model_from_real_data(device_id):
+            success = retrain_model_from_real_data(device_id)
+            if success:
                 success_count += 1
         except Exception as e:
             print(f"[ML] Retrain failed for {device_id}: {e}")
+
     if success_count > 0:
         MODEL_VERSION["version"]         += 1
         MODEL_VERSION["retrain_count"]   += 1
         MODEL_VERSION["training_source"]  = "real_field_data"
         MODEL_VERSION["training_samples"] = len(all_real)
+
     MODEL_VERSION["status"]          = "ready"
-    MODEL_VERSION["next_retrain_at"] = datetime.fromtimestamp(time.time() + RETRAIN_INTERVAL_SECONDS, tz=timezone.utc).isoformat()
-    if all_real:
+    MODEL_VERSION["next_retrain_at"] = datetime.fromtimestamp(
+        time.time() + RETRAIN_INTERVAL_SECONDS, tz=timezone.utc
+    ).isoformat()
+
+    test_sample = all_real[:100] if len(all_real) >= 100 else all_real
+    if test_sample:
         first_device = list(DEVICE_SECRETS.keys())[0]
-        MODEL_VERSION["accuracy_score"] = compute_model_accuracy(isolation_forests.get(first_device), scalers.get(first_device), all_real[:100])
-    print(f"[ML] ===== RETRAIN COMPLETE — v{MODEL_VERSION['version']} | {MODEL_VERSION['training_samples']} samples =====")
+        MODEL_VERSION["accuracy_score"] = compute_model_accuracy(
+            isolation_forests.get(first_device),
+            scalers.get(first_device),
+            test_sample
+        )
+
+    print(f"[ML] ========== RETRAIN CYCLE COMPLETE ==========")
+    print(f"[ML] Version: {MODEL_VERSION['version']} | Samples: {MODEL_VERSION['training_samples']} | Accuracy: {MODEL_VERSION['accuracy_score']}")
 
 
-def get_model_status():
+def get_model_status() -> dict:
     all_real = fetch_real_readings_from_db(limit=10000)
     return {
         **MODEL_VERSION,
-        "real_samples_available":      len(all_real),
-        "synthetic_baseline_active":   MODEL_VERSION["training_source"] == "synthetic",
+        "real_samples_available": len(all_real),
+        "synthetic_baseline_active": MODEL_VERSION["training_source"] == "synthetic",
         "devices": {
             device_id: {
                 "model_loaded":    device_id in isolation_forests,
                 "history_samples": len(reading_history.get(device_id, [])),
+                "baseline_stats":  BASELINE_STATS.get(device_id, {}),
             }
             for device_id in DEVICE_SECRETS.keys()
         }
@@ -501,18 +570,22 @@ def get_model_status():
 
 
 def start_background_retrainer():
-    def loop():
-        print("[ML] Background retrainer started — first retrain in 5 minutes")
+    def retrainer_loop():
+        print(f"[ML] Background retrainer started — interval: {RETRAIN_INTERVAL_SECONDS}s")
+
         time.sleep(300)
         run_full_retrain_cycle()
+
         while True:
             time.sleep(RETRAIN_INTERVAL_SECONDS)
             try:
                 run_full_retrain_cycle()
             except Exception as e:
                 print(f"[ML] Background retrain error: {e}")
-    threading.Thread(target=loop, daemon=True).start()
+
+    thread = threading.Thread(target=retrainer_loop, daemon=True)
+    thread.start()
+    print(f"[ML] Background retrainer thread launched — first retrain in 5 minutes")
 
 
 start_background_retrainer()
-

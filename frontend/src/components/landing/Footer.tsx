@@ -498,7 +498,7 @@ export default function Footer() {
           <div style={{ display: "flex", alignItems: "center", gap: 24 }}>
             {[
               { label: "GitHub",     href: "https://github.com/Excalibur677/verdchain" },
-              { label: "Biothon",    href: "https://biothon.xinity.in" },
+              
               { label: "Dashboard",  href: "/dashboard" },
             ].map(link => (
               <a
@@ -526,7 +526,7 @@ export default function Footer() {
               color:         "rgba(255,255,255,0.3)",
               letterSpacing: "0.06em",
             }}>
-              BIOTHON 2026 — TEAM EXCALIBUR
+               TEAM EXCALIBUR
             </span>
             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <motion.div
